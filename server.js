@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const db = require('./database');
 
 const app = express();
-const PORT = process.env.PORT || 3000
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -20,41 +20,29 @@ app.post('/api/register', async (req, res) => {
             return res.status(400).json({ error: 'Заполните все поля' });
         }
 
-        db.get('SELECT id FROM users WHERE LOWER(login) = LOWER(?)', [login], async (err, existing) => {
-            if (err) {
-                console.error(err);
-                return res.status(500).json({ error: 'Ошибка базы данных' });
+        const existing = db.prepare('SELECT id FROM users WHERE LOWER(login) = LOWER(?)').get(login);
+        if (existing) {
+            return res.status(400).json({ error: 'Пользователь с таким логином уже существует' });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const directionJSON = direction ? JSON.stringify(direction) : null;
+
+        const result = db.prepare(
+            `INSERT INTO users (login, name, password, role, direction, avatar) 
+             VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(login, name, hashedPassword, role || 'Наставник ВолгГМУ', directionJSON, avatar || null);
+
+        res.json({
+            success: true,
+            user: {
+                id: result.lastInsertRowid,
+                login,
+                name,
+                role: role || 'Наставник ВолгГМУ',
+                direction: direction || null,
+                avatar: avatar || null
             }
-            if (existing) {
-                return res.status(400).json({ error: 'Пользователь с таким логином уже существует' });
-            }
-
-            const hashedPassword = await bcrypt.hash(password, 10);
-            const directionJSON = direction ? JSON.stringify(direction) : null;
-
-            db.run(
-                `INSERT INTO users (login, name, password, role, direction, avatar) 
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [login, name, hashedPassword, role || 'Наставник ВолгГМУ', directionJSON, avatar || null],
-                function (err) {
-                    if (err) {
-                        console.error(err);
-                        return res.status(500).json({ error: 'Ошибка при создании пользователя' });
-                    }
-
-                    res.json({
-                        success: true,
-                        user: {
-                            id: this.lastID,
-                            login,
-                            name,
-                            role: role || 'Наставник ВолгГМУ',
-                            direction: direction || null,
-                            avatar: avatar || null
-                        }
-                    });
-                }
-            );
         });
     } catch (error) {
         console.error(error);
@@ -63,7 +51,7 @@ app.post('/api/register', async (req, res) => {
 });
 
 // ============ ВХОД ============
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
     try {
         const { login, password } = req.body;
 
@@ -71,36 +59,31 @@ app.post('/api/login', (req, res) => {
             return res.status(400).json({ error: 'Введите логин и пароль' });
         }
 
-        db.get('SELECT * FROM users WHERE LOWER(login) = LOWER(?)', [login], async (err, user) => {
-            if (err) {
-                console.error(err);
-                return res.status(500).json({ error: 'Ошибка базы данных' });
-            }
-            if (!user) {
-                return res.status(400).json({ error: 'Пользователь не найден' });
-            }
+        const user = db.prepare('SELECT * FROM users WHERE LOWER(login) = LOWER(?)').get(login);
+        if (!user) {
+            return res.status(400).json({ error: 'Пользователь не найден' });
+        }
 
-            const isValid = await bcrypt.compare(password, user.password);
-            if (!isValid) {
-                return res.status(400).json({ error: 'Неверный пароль' });
-            }
+        const isValid = await bcrypt.compare(password, user.password);
+        if (!isValid) {
+            return res.status(400).json({ error: 'Неверный пароль' });
+        }
 
-            let direction = null;
-            if (user.direction) {
-                try { direction = JSON.parse(user.direction); } catch (e) {}
-            }
+        let direction = null;
+        if (user.direction) {
+            try { direction = JSON.parse(user.direction); } catch (e) {}
+        }
 
-            res.json({
-                success: true,
-                user: {
-                    id: user.id,
-                    login: user.login,
-                    name: user.name,
-                    role: user.role,
-                    direction,
-                    avatar: user.avatar
-                }
-            });
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                login: user.login,
+                name: user.name,
+                role: user.role,
+                direction,
+                avatar: user.avatar
+            }
         });
     } catch (error) {
         console.error(error);
@@ -114,54 +97,36 @@ app.put('/api/users/:id', (req, res) => {
         const { id } = req.params;
         const { name, role, direction, avatar } = req.body;
 
-        const updates = [];
-        const values = [];
-
-        if (name) { updates.push('name = ?'); values.push(name); }
-        if (role) { updates.push('role = ?'); values.push(role); }
-        if (direction) { updates.push('direction = ?'); values.push(JSON.stringify(direction)); }
-        if (avatar !== undefined) { updates.push('avatar = ?'); values.push(avatar); }
-
-        if (updates.length === 0) {
-            return res.status(400).json({ error: 'Нечего обновлять' });
+        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+        if (!user) {
+            return res.status(404).json({ error: 'Пользователь не найден' });
         }
 
-        values.push(id);
+        const newName = name || user.name;
+        const newRole = role || user.role;
+        const newDirection = direction ? JSON.stringify(direction) : user.direction;
+        const newAvatar = avatar !== undefined ? avatar : user.avatar;
 
-        db.run(
-            `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
-            values,
-            function (err) {
-                if (err) {
-                    console.error(err);
-                    return res.status(500).json({ error: 'Ошибка обновления' });
-                }
-                if (this.changes === 0) {
-                    return res.status(404).json({ error: 'Пользователь не найден' });
-                }
+        db.prepare(
+            `UPDATE users SET name = ?, role = ?, direction = ?, avatar = ? WHERE id = ?`
+        ).run(newName, newRole, newDirection, newAvatar, id);
 
-                db.get('SELECT * FROM users WHERE id = ?', [id], (err, user) => {
-                    if (err || !user) {
-                        return res.status(500).json({ error: 'Ошибка' });
-                    }
-                    let directionData = null;
-                    if (user.direction) {
-                        try { directionData = JSON.parse(user.direction); } catch (e) {}
-                    }
-                    res.json({
-                        success: true,
-                        user: {
-                            id: user.id,
-                            login: user.login,
-                            name: user.name,
-                            role: user.role,
-                            direction: directionData,
-                            avatar: user.avatar
-                        }
-                    });
-                });
+        let directionData = null;
+        if (newDirection) {
+            try { directionData = JSON.parse(newDirection); } catch (e) {}
+        }
+
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                login: user.login,
+                name: newName,
+                role: newRole,
+                direction: directionData,
+                avatar: newAvatar
             }
-        );
+        });
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: 'Ошибка сервера' });
@@ -170,12 +135,8 @@ app.put('/api/users/:id', (req, res) => {
 
 // ============ ПОЛУЧИТЬ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ ============
 app.get('/api/users', (req, res) => {
-    db.all('SELECT id, login, name, role, direction, avatar, created_at FROM users', [], (err, rows) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Ошибка базы данных' });
-        }
-
+    try {
+        const rows = db.prepare('SELECT id, login, name, role, direction, avatar, created_at FROM users').all();
         const users = rows.map(row => {
             let direction = null;
             if (row.direction) {
@@ -183,28 +144,27 @@ app.get('/api/users', (req, res) => {
             }
             return { ...row, direction };
         });
-
         res.json(users);
-    });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Ошибка сервера' });
+    }
 });
 
-// ============ ПОЛУЧИТЬ НАСТАВНИКОВ (С ФИЛЬТРАМИ) ============
+// ============ ПОЛУЧИТЬ НАСТАВНИКОВ ============
 app.get('/api/mentors', (req, res) => {
-    const { search, level, direction, role } = req.query;
+    try {
+        const { search, level, direction } = req.query;
 
-    let sql = "SELECT id, login, name, role, direction, avatar, created_at FROM users WHERE role LIKE ?";
-    const params = ['%Наставник%'];
+        let sql = "SELECT id, login, name, role, direction, avatar, created_at FROM users WHERE role LIKE ?";
+        const params = ['%Наставник%'];
 
-    if (search) {
-        sql += " AND (name LIKE ? OR login LIKE ?)";
-        params.push(`%${search}%`, `%${search}%`);
-    }
-
-    db.all(sql, params, (err, rows) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({ error: 'Ошибка базы данных' });
+        if (search) {
+            sql += " AND (name LIKE ? OR login LIKE ?)";
+            params.push(`%${search}%`, `%${search}%`);
         }
+
+        const rows = db.prepare(sql).all(...params);
 
         let users = rows.map(row => {
             let directionData = null;
@@ -222,7 +182,10 @@ app.get('/api/mentors', (req, res) => {
         }
 
         res.json(users);
-    });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Ошибка сервера' });
+    }
 });
 
 // ============ ЗАПУСК ============
